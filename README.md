@@ -13,7 +13,7 @@ Merit Order (EMO) reports as the source.
 |---|---|---|
 | `bronze ingestion.ipynb` | Bronze | Discovers and downloads every Merit Order/MO/EMO PDF for May–Aug 2026 into a Unity Catalog Volume, then OCR-parses each PDF's table into `rf_assessment.bronze.merit_order_data` |
 | `silver layer transformation.ipynb` | Silver | Runs data quality checks, cleans and standardizes types, computes cost-breakdown percentages, writes `rf_assessment.silver.merit_order_data` |
-| `Gold Layer Insights.ipynb` | Gold | Aggregates plant-wise and fuel-type-wise cost variation, flags outliers, produces the charts and summary tables behind the findings |
+| `gold layer Insights.ipynb` | Gold | Aggregates plant-wise and fuel-type-wise cost variation, flags outliers, produces the charts and summary tables behind the findings |
 
 Each layer writes a Delta table before the next layer reads it, so any stage can be
 re-run independently and the raw PDFs are never touched again after Bronze — if a
@@ -81,6 +81,72 @@ assumption into Silver where it can't be revisited later.
 | Possible duplicate rows | Silver | Checked on the full set of key fields (plant, date, file, fuel type, all four cost columns) rather than plant+date alone, since the same plant legitimately appears more than once per report if it runs on more than one fuel type |
 | Negative cost values | Silver | Explicitly checked for and flagged (none were found in this run, but the check runs every time rather than assuming it's unnecessary) |
 | Year/month columns disagreeing with the parsed `effective_date` | Silver | Cross-validated against each other as a consistency check, to catch a bad date parse before it reaches the analysis layer |
+
+## Gold Layer — insights & analysis
+
+The pipeline runs as a single Databricks Job (`Merit_Order_ETL_Job`) with three
+chained tasks — Ingestion → Transformation → Insights — so Gold is always built from a
+fresh Bronze/Silver run rather than a manually-triggered notebook:
+
+![Merit Order ETL Job graph](imgs/Merit_Order_Job_Graph.png)
+
+The `Insights` task is where the four Gold analyses below are computed and saved as
+their own Delta tables (`gold.plant_cost_variation`, `gold.monthly_plant_costs`,
+`gold.cost_outliers`, `gold.fuel_type_monthly_analysis`, `gold.fuel_type_summary`), so
+any of these can be queried directly rather than only viewed as a chart.
+
+### 1. Fuel type is the first-order driver of cost, and of who runs at all
+
+![Average cost by fuel type](imgs/average_fuel_cost.png)
+
+HSD (diesel) and LSFO plants sit far above everything else — **Rs 147.4/kWh and
+Rs 112.2/kWh** respectively — roughly 4-6x the cost of RLNG (Rs 83.3) and 5-6x coal or
+piped gas (Rs 22-24/kWh). The pie chart explains why that matters: HSD and LSFO plants
+are a small slice of the fleet (14.0% and 2.3% of plants), while the cheap end — RLNG
+(29.1%) and GAS (25.6%) — makes up more than half of all plants. This is the merit order
+working as designed: the cheapest fuels carry most of the base load, and the expensive
+diesel/furnace-oil plants exist mainly as the last-resort capacity dispatched when
+cheaper supply runs out. It also sets up the next chart — being *expensive* and being
+*volatile* turn out to be two different plants.
+
+### 2. RLNG plants — not the most expensive fuel — show the most month-to-month swing
+
+![Top 15 plants by fuel cost variation](imgs/highest_fuel_variation.png)
+
+Almost every plant on this top-15 list runs on RLNG, despite RLNG sitting mid-pack on
+average cost (Rs 83.3/kWh vs. HSD's Rs 147.4). **Nandipur (OC)** has the widest swing
+(~Rs 34/kWh between its cheapest and most expensive month), followed by **NPPMC -
+Baloki (OC)**, **Davis Energen**, and **NPPMC - HBS (OC)** all in the high Rs 20s. The
+takeaway for a non-technical reader: HSD/LSFO plants are consistently expensive, but
+RLNG plants are where the price *risk* actually lives — which matters more for budgeting
+than the average cost alone would suggest, since a volatile input is harder to plan
+around than a stable-but-pricey one.
+
+### 3. The cost run-up is concentrated in July–August, not spread evenly across the period
+
+![Monthly fuel cost trend for the 10 most variable plants](imgs/fuel_cost_trend.png)
+
+Nearly every one of the top-10 most variable plants follows the same shape: a small dip
+from May to June, then a steep climb from June through August. **Nandipur (OC)** more
+than doubles (~Rs 35/kWh in June to ~Rs 73/kWh in August); **Orient Power Company**
+roughly triples over the same window (~Rs 25 to ~Rs 65/kWh). Because this pattern shows
+up across plants with different owners and (mostly) the same fuel type at the same time,
+it points to a shared external cost shock hitting RLNG-fired generation in that window —
+consistent with the fossil-fuel supply disruption referenced in the assessment brief —
+rather than anything plant-specific.
+
+### 4. Outliers cluster on one plant, not one bad month
+
+![Outlier detection by fuel type and by plant](imgs/outlier_detection.png)
+
+Running IQR outlier detection separately within each fuel type (see *Design decisions*
+above) flagged 7 outlier readings total — 4 RLNG, 3 LSFO. What stands out is *where*
+they cluster: **Nandipur (OC)** alone accounts for 4 of the 7 flagged readings, with
+**KAPCO Block-I** responsible for 3. Combined with chart 2 and 3, this reframes Nandipur
+(OC) from "one plant among several with high variation" to the single plant that most
+consistently deviated from its own fuel type's normal cost range across multiple report
+snapshots — the strongest single candidate for a plant-specific line item in the
+findings, rather than pure market-wide fuel cost movement.
 
 ## Known gaps / next steps
 
